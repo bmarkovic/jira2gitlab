@@ -1,0 +1,7 @@
+# Downloaded files go here
+#
+# it is important that nothing but the directory itself
+*
+# and this gitignore file
+!.gitignore
+# are ever checked-in to the repo

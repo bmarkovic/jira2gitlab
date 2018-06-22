@@ -1,0 +1,23 @@
+{
+  "name": "jira2gitlab",
+  "version": "0.1.0",
+  "description": "JIRA to GitLab migration tool",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "jira",
+    "gitlab",
+    "rest",
+    "migration",
+    "node"
+  ],
+  "author": "Bojan Markovic <bmarkovic.79@gmail.com>",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^2.4.1",
+    "lodash": "^4.17.10",
+    "needle": "^2.2.1"
+  }
+}

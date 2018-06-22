@@ -1,6 +1,8 @@
 const fs = require('fs')
+const path = require('path')
 const needle = require('needle')
 const chalk = require('chalk')
+const ora = require('ora')
 const _ = require('lodash')
 
 const print = console.debug.bind(console)
@@ -18,10 +20,6 @@ const defaultConfig = JSON.parse(`
   "gitlab": {
     "url": "https://gitlab.com",
     "project": "",
-    "account": {
-      "username": "",
-      "password": ""
-    },
     "token": ""
   }
 }
@@ -38,6 +36,31 @@ const debug = (
 const error = s => print(chalk.bold.red(s))
 const info = s => print(chalk.yellow(s))
 
+const spinner = (
+  (process.env.NODE_ENV && process.env.NODE_ENV.includes('devel')) ||
+  (process.env.DEBUG && process.env.DEBUG > 0)
+)
+  // in debug mode emulate ora API but print debug info
+  ? {
+        __txt: '',
+        start(x) {
+          this.__txt = x
+          print(x)
+        },
+        get text() {
+          return this.__txt
+        },
+        set text(x) {
+          this.__txt = x
+          print(x)
+        },
+        succeed() {
+          print(chalk.green('✔ Success:') + ' ' + this.__txt)
+          this.__txt = ''
+        }
+    }
+  // in production mode return ora instance
+  : ora()
 /**
  * Promisified fs.readFile
  */
@@ -87,8 +110,14 @@ const gitlabSearchProjectsUrl = (gitlab) => {
   return `${gitlab.url}/api/v4/projects/?search=${encodeURIComponent(projectName)}`
 }
 
+const gitlabBinaryUploadUrl = gitlab =>
+  `${gitlab.url}/api/v4/projects/${gitlab.projectId}/uploads`
+
 const gitlabIssueUrl = gitlab =>
   `${gitlab.url}/api/v4/projects/${gitlab.projectId}/issues`
+
+const getNewUploadUrl = (gitlab, upload) =>
+  `${gitlab.url}/${gitlab.project}${upload.url}`
 
 const jiraToGitlabUser = (jiraUser, gitlabUsers) =>
   jiraUser
@@ -102,7 +131,7 @@ const jiraToGitlabIssue = (jiraIssue, jiraAttachments, jiraComments, gitlabUsers
     jiraIssue.fields.fixVersions.length > 0
     ? jiraIssue.fields.fixVersions.map(f => f.name)
     : []
-  )],
+  )].join(','),
   created_at: jiraIssue.fields.created,
   updated_at: jiraIssue.fields.updated,
   done: (
@@ -120,8 +149,10 @@ const jiraToGitlabIssue = (jiraIssue, jiraAttachments, jiraComments, gitlabUsers
     author: jiraToGitlabUser(jiraAttachment.author, gitlabUsers),
     filename: jiraAttachment.filename,
     content: jiraAttachment.content,
-    created_at: jiraAttachment.created
-  }))
+    created_at: jiraAttachment.created,
+    mimeType: jiraAttachment.mimeType
+  })),
+  jira_key: jiraIssue.key
 })
 
 const get = async req => {
@@ -190,6 +221,25 @@ const getJiraAttachements = async (jira, jiraIssue) => {
   return resp
 }
 
+const getBinaryLocalFilename = (key, jiraAttachment) =>
+  'payloads/' + key + '_' + jiraAttachment.filename
+
+const getJiraAttachementBinary = async (jira, jiraIssue, jiraAttachment) => {
+  let req = {
+    url: jiraAttachment.content,
+    auth: 'basic',
+    username: jira.account.username,
+    password: jira.account.password,
+    options: {
+      output: getBinaryLocalFilename(jiraIssue.key, jiraAttachment)
+    }
+  }
+
+  let resp = await get(req)
+  // TODO: return attachments and comments
+  return resp
+}
+
 const getGitlabUsers = async (gitlab) => {
   let req = {
     url: gitlabUsersUrl(gitlab),
@@ -212,18 +262,45 @@ const searchGitlabProjects = async (gitlab) => {
   return get(req)
 }
 
+const uploadBinaryToGitlab = async (gitlab, filename, mimeType) => {
+  debug('Uoloading file: ' + chalk.cyan(filename) + ' mime: ' + chalk.cyan(mimeType))
+  let req = {
+    url: gitlabBinaryUploadUrl(gitlab),
+    headers: {
+      'PRIVATE-TOKEN': gitlab.token
+    },
+    options: {
+      multipart: true
+    },
+  }
+  let data = {
+    file: {
+      file: filename,
+      content_type: mimeType
+    }
+  }
+
+  return post(req, data)
+}
+
 const postGitlabIssue = async (gitlab, issue) => {
   let req = {
     url: gitlabIssueUrl(gitlab),
     headers: {
       'PRIVATE-TOKEN': gitlab.token
     },
-    data: issue
+    options: { json: true }
   }
 
-  return post(req)
+  let data = issue
+
+  return post(req, data)
 }
 
+
+/**
+ * Main script body
+ */
 const main = async () => {
   print(
     chalk.bold('\njira2gitlab\n\n') +
@@ -231,21 +308,53 @@ const main = async () => {
     chalk.bold.cyan(' .. use at your own peril .. \n')
   )
 
-  info('Getting configuration..')
+  /**
+   *   GETTING CONFIGURATION
+   */
+
+  spinner.start(chalk.yellow(' Getting configuration..'))
   const fileConfig = await (() => readJSON('./config.json')
     .then(config => { return config })
-    .catch(err => { return {} }) // we don't care, we just go with defaults
+    .catch(async err => {
+       // We will complain and write defaults to the
+       // Filesystem
+
+       error('\nMissing "config.json" configuration file\n')
+       await writeJSON('config.json', defaultConfig)
+       info(`We've written "config.json" with the defaults for you.\n`)
+       print(
+         `Edit the file with your instance information before running\n` +
+         `the program again.`
+      )
+      process.exit(1)
+    })
   )()
 
   const config = _.merge({}, defaultConfig, fileConfig)
 
-  info('Getting base Gitlab and JIRA instance data..')
+  spinner.succeed()
+
+
+  /**
+   *   GETTING BASIC INSTANCE DATA
+   *
+   * Using Promise.all we'll parallel download
+   *
+   * - Gitlab Users
+   * - Gitlab projects with similar name to given project
+   * - All Jira issues for the given JIRA project
+   *
+   */
+
+  spinner.start(chalk.yellow(' Getting base Gitlab and JIRA instance data..'))
+
   let [ gitlabUsers, gitlabProjects, { issues: jiraIssues } ] = await Promise.all([
     await getGitlabUsers(config.gitlab),
     await searchGitlabProjects(config.gitlab),
     (await getJiraIssues(config.jira)) || {}
   ])
 
+  // Find the config.gitlab.project ID
   let gitlabProject = gitlabProjects.find(
     proj => proj.path_with_namespace === config.gitlab.project
   )
@@ -260,6 +369,7 @@ const main = async () => {
     config.gitlab.projectId = gitlabProject.id
   }
 
+  // No issues for given project, die
   if (!jiraIssues) {
     throw new Error(`Couldn't find issues for "${config.jira.project}" on JIRA instance`)
   } else {
@@ -269,12 +379,47 @@ const main = async () => {
     )
   }
 
+  // Update spinner with some data stats
+  spinner.text = chalk.yellow(' Getting base Gitlab and JIRA instance data.. ') +
+    chalk.cyan(jiraIssues.length + ' issues')
+  spinner.succeed()
+
+  /**
+   *   GETTING JIRA ISSUE ATTACHMENTS
+   *
+   * Using Promise.all we'll parallel download
+   *
+   * - Issue attachment and comment metadata
+   * - All Jira attachment binaries, and store them in the filesystem
+   *
+   */
+
   let attComm = []
+  let atts = 0
+  let procAtts = 0
+  let comms = 0
+  let curKey = ''
+
+  spinner.start(chalk.yellow(' Getting Jira Issue attachments..'))
+
+  // spinner updating local closure
+  let updAtts = (key) => {
+
+    if (key) curKey = key
+
+    spinner.text = (
+      chalk.yellow(' Getting Jira Issue attachments.. Processing ') +
+      chalk.magenta(curKey + ': ') +
+      chalk.cyan(procAtts + '/' + atts) +
+      chalk.yellow(' attachments')
+    )
+  }
 
   let gitlabIssues = await Promise.all(jiraIssues.map(
     async jiraIssue => {
 
       let { fields } = await getJiraAttachements(config.jira, jiraIssue)
+      updAtts(jiraIssue.key)
 
       if (!fields) {
 
@@ -288,6 +433,9 @@ const main = async () => {
         let jiraAttachments = fields.attachment
         let jiraComments = fields.comment.comments
 
+        atts += jiraAttachments.length
+        updAtts()
+
         debug(
           'JIRA issue ' + chalk.cyan(jiraIssue.key) +
           ' has: ' + chalk.bold.cyan(jiraAttachments.length) + ' attachments and ' +
@@ -295,19 +443,173 @@ const main = async () => {
         )
         attComm.push({issue: jiraIssue.key, attachments: jiraAttachments, comments: jiraComments})
 
+        let binaries = await Promise.all(jiraAttachments.map(
+          jiraAttachment => {
+            debug('Downloading ' + chalk.cyan(jiraAttachment.content))
+            return getJiraAttachementBinary(config.jira, jiraIssue, jiraAttachment)
+          }
+        ))
+
+        debug(chalk.green('Downloaded ') + chalk.magenta(binaries.length) + ' binaries')
+        procAtts += binaries.length
+        updAtts()
+
         return jiraToGitlabIssue(jiraIssue, jiraAttachments, jiraComments, gitlabUsers)
 
       }
     }
   ))
 
-  Promise.all([
+  // No issues, something is very wrong now, die
+  if (!gitlabIssues) {
+    throw new Error(
+      `Couldn't transform issues for "${config.jira.project}" or download ` +
+      `binaries from the instance.`)
+  } else {
+    debug(
+      'Downloaded '+ chalk.bold.cyan(atts) + ' attachments from project: '  +
+      chalk.cyan(config.jira.project)
+    )
+  }
+
+  spinner.succeed()
+
+  /**
+   *   SAVING DOWNLOADED DATA AS JSON FILES TO DISK
+   *
+   * Using Promise.all we'll parallel save all the data so far to disk
+   *
+   */
+
+  spinner.start(
+    chalk.yellow(' Storing downloaded data to ') +
+    chalk.cyan('./payloads/')
+  )
+
+  await Promise.all([
     writeJSON('payloads/gitlab-projects.json', gitlabProjects),
     writeJSON('payloads/gitlab-users.json', gitlabUsers),
     writeJSON('payloads/jira-issues.json', jiraIssues),
-    writeJSON('payloads/gitlab-issues.json', gitlabIssues),
+    writeJSON('payloads/interim-issues.json', gitlabIssues),
     writeJSON('payloads/att-comm.json', attComm)
   ])
+
+  spinner.succeed()
+
+  /**
+   *   POSTING ATTACHMENTS AND ISSUES
+   *
+   * Using await and sync iteration we'll serially
+   *
+   * - Upload issue attachment binaries as project binaries
+   * - Rebind transformed Github issues to new binaries as attachments
+   * - Post issues to Gitlab
+   *
+   * If no 'go' CLI parameter, we'll just end here
+   *
+   */
+
+  let counter = 0
+  let issueCounter = 0
+  let gitlabPosts = []
+
+  // if 'go' CLI parameter was given, post issues to Gitlab
+  try {
+    if (process.argv[2] === 'go') {
+
+      spinner.start(chalk.yellow(' Posting Gitlab issues to Gitlab..'))
+
+      // reset all counter values
+      atts = 0
+      procAtts = 0
+      comms = 0
+      curKey = ''
+
+      // spinner updating local closure
+      let updGlab = (key) => {
+
+        if (key) curKey = key
+
+        spinner.text = (
+          chalk.yellow(' Posting Gitlab issues to Gitlab.. Processing ') +
+          chalk.magenta(curKey + ': ') +
+          chalk.cyan(procAtts + '/' + atts) +
+          chalk.yellow(' attachments')
+        )
+      }
+
+      // I had to do it synchronously for the logic to hold
+
+
+      for (let issue of gitlabIssues) {
+
+        if (issueCounter > 4) throw new Error('Enough!')
+
+        let jiraKey = issue.jira_key
+        let newIssue = _.cloneDeep(issue)
+        delete newIssue.jira_key
+
+        if (jiraKey !== 'STAT-4') continue
+
+        atts += issue.attachments.length
+
+        let attachments = []
+
+        if (issue.attachments.length > 0) {
+          for (let attachment of issue.attachments) {
+
+            let attach = _.cloneDeep(attachment)
+            let filename = getBinaryLocalFilename(jiraKey, attachment)
+            let upload
+
+            upload = await uploadBinaryToGitlab(config.gitlab, filename, attach.mimeType)
+
+            // in case of an upload error we want to end
+            if (upload.error) {
+              throw new Error(upload.error)
+            }
+
+            counter += 1
+            debug('Counter: ' + counter)
+
+            let newUrl = getNewUploadUrl(config.gitlab, upload)
+            debug('new upload url: ' + chalk.cyan(newUrl))
+
+            attach.content = newUrl
+            procAtts++
+            updGlab()
+
+            attachments.push(attach)
+          }
+
+        } else {
+          attachments = issue.attachments
+        }
+
+        updGlab(jiraKey)
+        newIssue.attachments = _.cloneDeep(attachments)
+
+        let issueResp = await postGitlabIssue(config.gitlab, newIssue)
+        debug(issueResp)
+
+        if (issueResp.error) {
+          throw new Error(issueResp.error)
+        } else issueCounter += 1
+
+        gitlabPosts.push(newIssue)
+
+      }
+
+      await writeJSON('payloads/gitlab-issues.json', gitlabPosts)
+      spinner.succeed()
+    }
+  } catch (err) {
+    // record what we got so far
+    await writeJSON('payloads/gitlab-issues-error.json', gitlabPosts)
+    // rethrow
+    throw err
+  }
+
 
 }
 
@@ -321,6 +623,8 @@ if (
   main()
   .then()
   .catch(err => {
+    print()
     error(err)
+    process.exit(1)
   })
 }

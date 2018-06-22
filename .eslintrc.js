@@ -24,6 +24,9 @@ module.exports = {
     "eqeqeq":0,
     "space-in-parens": 0,
     "curly": 0,
-    "no-template-curly-in-string": 0
+    "no-template-curly-in-string": 0,
+    "handle-callback-err": 0,
+    "no-return-await": 0,
+    "no-unneeded-ternary": 0
   }
 }

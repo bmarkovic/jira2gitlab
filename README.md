@@ -69,7 +69,7 @@ then edit with your required data. The configuration is commented below:
                                         // limitations
 
     "sudo": true                        // Gitlab API sudo. Use this to post
-                                        // issues to gitla
+                                        // issues to gitlab as original authors
   }
 }
 ```
@@ -113,10 +113,11 @@ On that page you need to name the token, tick all the access restriction boxes
 and **copy the issued token string somewhere safe**, as AFAIK you cannot see it
 again after you close the page (but you can issue another one).
 
-Ticking all access restriction boxes is important. Unless you are an Admin user
-of the Gitlab instance and
-
 This string is what you need to paste into the `token` key in the config.
+
+Ticking all access restriction boxes is important. Unless you are an Admin user
+of the Gitlab instance, and you've enabled 'sudo' access for the token full user
+matching as described above will not work.
 
 ### Debug Mode
 

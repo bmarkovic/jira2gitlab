@@ -50,11 +50,17 @@ const getInstanceData = async () => {
 
   const { config } = global
 
-  let [ gitlabUsers, gitlabProjects, { issues: jiraIssues } ] = await Promise.all([
+  let [ gitlabUsers, gitlabProjects, jiraIssuesResp ] = await Promise.all([
     await getGitlabUsers(config.gitlab),
     await searchGitlabProjects(config.gitlab),
     (await getJiraIssues(config.jira)) || {}
   ])
+
+  let jiraIssues = jiraIssuesResp.issues
+
+  if (gitlabProjects.message) {
+    throw new Error(`Unable to get Gitlab projects, got "${gitlabProjects.message}" instead`)
+  }
 
   // Find the config.gitlab.project ID
   let gitlabProject = gitlabProjects.find(
@@ -73,7 +79,8 @@ const getInstanceData = async () => {
 
   // No issues for given project, die
   if (!jiraIssues) {
-    throw new Error(`Couldn't find issues for "${config.jira.project}" on JIRA instance`)
+    debug('Jira issues response: ' + JSON.stringify(jiraIssuesResp, null, 2))
+    throw new Error(`Couldn't find issues for "${config.jira.project}" on JIRA instance.`)
   } else {
     debug(
       'JIRA project ' + chalk.cyan(config.jira.project) +
@@ -130,7 +137,10 @@ const getJiraAttachments = async (jiraIssues, gitlabUsers) => {
         error(`Couldn't find fields for ${jiraIssue.key} on JIRA instance`)
         attComm.push({issue: jiraIssue.key, attachments: [], comments: []})
 
-        return jiraToGitlabIssue(jiraIssue, [], [], gitlabUsers, config.sudo)
+        return jiraToGitlabIssue(
+          jiraIssue, [], [], gitlabUsers, config.gitlab.sudo,
+          config.gitlab.emailMap, config.settings.matchByUserName
+        )
 
       } else {
 
@@ -158,7 +168,11 @@ const getJiraAttachments = async (jiraIssues, gitlabUsers) => {
         procAtts += binaries.length
         updAtts()
 
-        return jiraToGitlabIssue(jiraIssue, jiraAttachments, jiraComments, gitlabUsers, config.sudo)
+        return jiraToGitlabIssue(
+          jiraIssue, jiraAttachments, jiraComments, gitlabUsers,
+          config.gitlab.sudo, config.gitlab.emailMap,
+          config.settings.matchByUserName
+        )
 
       }
     }
@@ -336,8 +350,8 @@ const main = async () => {
         newIssue.description += tailDescription
 
         let issueResp = await postGitlabIssue(config.gitlab, newIssue, config.sudo)
-
-        if (issueResp.error) {
+        debug(JSON.stringify(issueResp, null, 2))
+        if (issueResp.error || issueResp.message) {
           throw new Error(issueResp.error)
         } else issueCounter += 1
 

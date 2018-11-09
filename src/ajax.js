@@ -1,6 +1,33 @@
 const needle = require('needle')
-const { debug } = require('./util.js')
+const { debug, error } = require('./util.js')
 const chalk = require('chalk')
+
+const handleRes = (req, res) => {
+  if (res && res.statusCode >= 200 && res.statusCode < 300) {
+    debug(chalk.green('GET Success!: ') + chalk.cyan(req.url))
+    debug(
+      'Got data of type: ' +
+      chalk.cyan(typeof res.body) +
+      ' with length: ' +
+      chalk.cyan(res.body.length))
+    return res.body
+  } else if (res && res.statusCode >= 400) {
+    let body = res.body
+    let message = body.message ||
+        `${res.statusCode}: Unspecified HTTP errror.`
+    error(message)
+    let err = new Error(message)
+    err.status = res.statusCode
+    throw err
+  } else {
+    let errorFull = JSON.stringify(res, null, 2)
+    let message = (res.body && res.body.message) || 'Unspecified connection error'
+    error('\n' + message)
+    debug('\n' + errorFull)
+    let err = new Error(message)
+    throw err
+  }
+}
 
 const get = async req => {
 
@@ -13,15 +40,7 @@ const get = async req => {
 
   let res = await needle('get', req.url, options)
 
-  if (res && res.statusCode === 200) {
-    debug(chalk.green('GET Success!: ') + chalk.cyan(req.url))
-    debug(
-      'Got data of type: ' +
-      chalk.cyan(typeof res.body) +
-      ' with length: ' +
-      chalk.cyan(res.body.length))
-  }
-  return res.body
+  return handleRes(req, res)
 }
 
 const post = async (req, data) => {
@@ -36,15 +55,7 @@ const post = async (req, data) => {
 
   let res = await needle('post', req.url, data, options)
 
-  if (res && res.statusCode === 200) {
-    debug(chalk.violet('POST Success!: ') + chalk.cyan(req.url))
-    debug(
-      'Got data of type: ' +
-      chalk.cyan(typeof res.body) +
-      ' with length: ' +
-      chalk.cyan(res.body.length))
-  }
-  return res.body
+  return handleRes(req, res)
 }
 
 module.exports = {

@@ -16,12 +16,14 @@ const defaultConfig = JSON.parse(`
   "gitlab": {
     "url": "https://gitlab.com",
     "project": "",
-    "token": ""
+    "token": "",
+    "emailMap": null
   },
   "settings": {
     "rejectUnauthorized": false,
     "ignoreDone": false,
-    "sudo": true
+    "sudo": true,
+    "matchByUserName": true
   }
 }
 `)
@@ -34,6 +36,11 @@ const getConfig = async () => {
       .catch(async err => {
         // We will complain and write defaults to the
         // Filesystem
+        if (err.message && err.message.includes('Unexpected')) {
+          error(`\nMalformated "config.json" configuartion file\nCheck format and try again...\n`)
+          error(`${err.message}`)
+          process.exit(1)
+        }
         error('\nMissing "config.json" configuration file\n')
 
         await writeJSON('config.json', defaultConfig)
